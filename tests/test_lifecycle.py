@@ -232,3 +232,23 @@ class TestCrossPlatform(Base):
                                side_effect=lambda *a, **k: calls.append(a)):
             crimp.cmd_ensure([])
         self.assertEqual(calls, [])
+
+    def test_daemon_grabs_only_when_clipboard_changes(self):
+        """pngpaste is an exec; on a Mac it must run on a changeCount bump, not every tick."""
+        crimp.IS_MAC = True
+        counts = iter([1, 1, 1, 2, 2])
+        grabs, ticks = [], [0]
+
+        def fake_sleep(_):
+            ticks[0] += 1
+            if ticks[0] >= 5:
+                raise KeyboardInterrupt
+
+        with mock.patch.object(crimp, "_mac_change_count_fn", return_value=lambda: next(counts)), \
+             mock.patch.object(crimp, "_grab_clipboard", side_effect=lambda: grabs.append(1) or b"png"), \
+             mock.patch.object(crimp, "_remote", return_value=mock.Mock(returncode=0, stderr=b"")), \
+             mock.patch.object(crimp, "_grabber_missing", return_value=None), \
+             mock.patch.object(crimp.time, "sleep", side_effect=fake_sleep):
+            with self.assertRaises(KeyboardInterrupt):
+                crimp.cmd_daemon_run([])
+        self.assertEqual(len(grabs), 2)

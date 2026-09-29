@@ -371,6 +371,31 @@ def _grab_clipboard():
     return p.stdout if p.returncode == 0 and p.stdout else None
 
 
+def _mac_change_count_fn():
+    """A zero-exec reader of NSPasteboard.generalPasteboard.changeCount, or None.
+
+    Called through the ObjC runtime with ctypes (no pyobjc), so the daemon can
+    skip pngpaste until the clipboard actually changes: endpoint security
+    agents scan every exec, and a 1 s pngpaste loop is 60 execs a minute."""
+    try:
+        import ctypes
+        ctypes.cdll.LoadLibrary("/System/Library/Frameworks/AppKit.framework/AppKit")
+        objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        send = ("objc_msgSend", objc)
+        msg_id = ctypes.CFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)(send)
+        msg_long = ctypes.CFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p)(send)
+        pb = msg_id(objc.objc_getClass(b"NSPasteboard"),
+                    objc.sel_registerName(b"generalPasteboard"))
+        sel = objc.sel_registerName(b"changeCount")
+    except (OSError, AttributeError):
+        return None
+    return (lambda: msg_long(pb, sel)) if pb else None
+
+
 def cmd_push(args):
     if not args:
         die("usage: crimp push <host>")
@@ -412,12 +437,20 @@ def cmd_daemon_run(_args):
                 log(f"{subcmd} -> {h} FAILED (backoff {BACKOFF}s): "
                     f"{p.stderr.decode(errors='replace').strip()[:200]}")
 
+    change_count = _mac_change_count_fn() if IS_MAC else None
     last_hash, had_img = None, True  # had_img=True: first non-image tick clears remotes
+    last_count = None
     try:
         while True:
             if PAUSED.exists():
                 time.sleep(POLL)
                 continue
+            if change_count:
+                count = change_count()
+                if count == last_count:
+                    time.sleep(POLL)
+                    continue
+                last_count = count
             data = _grab_clipboard()
             if data:
                 h = hashlib.md5(data).hexdigest()
